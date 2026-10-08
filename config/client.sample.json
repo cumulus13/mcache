@@ -1,0 +1,4 @@
+{
+  "RequestQueue": ".\\Private$\\MsmqCacheRequests",
+  "TimeoutSeconds": 5
+}

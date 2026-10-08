@@ -1,0 +1,18 @@
+bin/
+obj/
+artifacts/
+TestResults/
+.vs/
+.idea/
+*.user
+*.suo
+*.tmp
+# runtime files created next to the exe when running from the build output
+**/config.json
+**/client.json
+**/data/
+!config/*.json
+
+# Ignore Sublime Text project files
+*.sublime-project
+*.sublime-workspace

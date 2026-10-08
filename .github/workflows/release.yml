@@ -1,0 +1,74 @@
+name: release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: write
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  package:
+    needs: ci
+    runs-on: windows-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: true
+      matrix:
+        mode: [framework-dependent, self-contained]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Derive version from tag
+        id: ver
+        shell: pwsh
+        run: |
+          $v = '${{ github.ref_name }}'.TrimStart('v')
+          "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $p = @{ Version = '${{ steps.ver.outputs.version }}' }
+          if ('${{ matrix.mode }}' -eq 'self-contained') { $p.SelfContained = $true }
+          ./scripts/package.ps1 @p
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.mode }}
+          path: |
+            artifacts/*.zip
+            artifacts/*.sha256
+          retention-days: 7
+
+  publish:
+    needs: package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: release-*
+          merge-multiple: true
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd dist
+          ls -la
+          flags=""
+          case "$GITHUB_REF_NAME" in *-*) flags="--prerelease" ;; esac
+          gh release create "$GITHUB_REF_NAME" ./* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes $flags

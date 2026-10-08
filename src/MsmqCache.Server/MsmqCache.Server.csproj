@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <AssemblyName>mcached</AssemblyName>
+    <RootNamespace>MsmqCache</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="..\Shared\Protocol.cs" Link="Protocol.cs" />
+    <PackageReference Include="Experimental.System.Messaging" Version="1.2.0" />
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="8.0.*" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="8.0.*" />
+  </ItemGroup>
+</Project>

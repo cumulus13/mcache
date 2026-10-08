@@ -1,0 +1,16 @@
+{
+  "RequestQueue": ".\\Private$\\MsmqCacheRequests",
+  "DataDirectory": "data",
+  "PersistenceEnabled": true,
+  "SnapshotIntervalSeconds": 60,
+  "MaxMemoryMb": 256,
+  "MaxKeys": 0,
+  "EvictionPolicy": "allkeys-lru",
+  "DefaultTtlSeconds": 0,
+  "WorkerThreads": 4,
+  "ReplyTtlSeconds": 30,
+  "MaxKeyLength": 512,
+  "MaxValueLength": 1000000,
+  "SweepIntervalMs": 1000,
+  "DisabledCommands": []
+}

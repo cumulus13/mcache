@@ -1,0 +1,49 @@
+name: build
+
+on:
+  push:
+    branches: [main, master]
+    paths-ignore:
+      - "**.md"
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  package:
+    needs: ci
+    runs-on: windows-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [framework-dependent, self-contained]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $p = @{ Version = "1.0.0-ci.${{ github.run_number }}" }
+          if ('${{ matrix.mode }}' -eq 'self-contained') { $p.SelfContained = $true }
+          ./scripts/package.ps1 @p
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: msmqcache-${{ matrix.mode }}
+          path: |
+            artifacts/*.zip
+            artifacts/*.sha256
+          retention-days: 14
