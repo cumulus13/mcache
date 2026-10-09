@@ -1,7 +1,8 @@
 <#
-.SYNOPSIS  Publishes server + client and zips them with a SHA256 file into ./artifacts.
+.SYNOPSIS  Publishes server + client and archives them with a SHA256 file into ./artifacts.
+           win-* => .zip ; linux-* => .tar.gz (keeps the executable bit).
 .EXAMPLE   .\scripts\package.ps1 -Version 1.0.0
-.EXAMPLE   .\scripts\package.ps1 -Version 1.0.0 -SelfContained
+.EXAMPLE   .\scripts\package.ps1 -Version 1.0.0 -Rid linux-x64 -SelfContained
 #>
 param(
     [string]$Version = "0.0.0-local",
@@ -27,11 +28,21 @@ foreach ($p in @("Server", "Client")) {
 }
 
 Copy-Item "$root/config" "$stage/config" -Recurse
-Copy-Item "$root/scripts/install-service.ps1", "$root/scripts/uninstall-service.ps1", "$root/README.md", "$root/LICENSE" $stage
+$extra = @("$root/README.md", "$root/LICENSE", "$root/THIRD-PARTY-NOTICES.md")
+if ($Rid -like "win-*")   { $extra += "$root/scripts/install-service.ps1", "$root/scripts/uninstall-service.ps1" }
+if ($Rid -like "linux-*") { $extra += "$root/scripts/mcached.service" }
+Copy-Item $extra $stage
 
-$zip = Join-Path $root "$Out/$name.zip"
-if (Test-Path $zip) { Remove-Item $zip }
-Compress-Archive -Path "$stage/*" -DestinationPath $zip
-$hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
-"$hash  $name.zip" | Set-Content "$zip.sha256" -Encoding ascii
-Write-Host "Created $zip"
+if ($Rid -like "linux-*") {
+    $archive = Join-Path $root "$Out/$name.tar.gz"
+    if (Test-Path $archive) { Remove-Item $archive }
+    tar -czf $archive -C $stage .
+    if ($LASTEXITCODE -ne 0) { throw "tar failed" }
+} else {
+    $archive = Join-Path $root "$Out/$name.zip"
+    if (Test-Path $archive) { Remove-Item $archive }
+    Compress-Archive -Path "$stage/*" -DestinationPath $archive
+}
+$hash = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLower()
+"$hash  $(Split-Path -Leaf $archive)" | Set-Content "$archive.sha256" -Encoding ascii
+Write-Host "Created $archive"

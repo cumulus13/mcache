@@ -16,3 +16,6 @@ TestResults/
 # Ignore Sublime Text project files
 *.sublime-project
 *.sublime-workspace
+
+# Added entries (1 items)
+downloads/

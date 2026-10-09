@@ -1,5 +1,15 @@
 {
-  "RequestQueue": ".\\Private$\\MsmqCacheRequests",
+  "EnableTcp": true,
+  "BindAddress": "127.0.0.1",
+  "Port": 6379,
+  "Password": "",
+  "MaxClients": 10000,
+  "IdleTimeoutSeconds": 0,
+  "TcpKeepAlive": true,
+  "TlsEnabled": false,
+  "TlsCertificatePath": "",
+  "TlsCertificatePassword": "",
+
   "DataDirectory": "data",
   "PersistenceEnabled": true,
   "SnapshotIntervalSeconds": 60,
@@ -7,10 +17,23 @@
   "MaxKeys": 0,
   "EvictionPolicy": "allkeys-lru",
   "DefaultTtlSeconds": 0,
-  "WorkerThreads": 4,
-  "ReplyTtlSeconds": 30,
   "MaxKeyLength": 512,
   "MaxValueLength": 1000000,
   "SweepIntervalMs": 1000,
-  "DisabledCommands": []
+  "DisabledCommands": [],
+
+  "EnableMsmq": false,
+  "RequestQueue": ".\\Private$\\MsmqCacheRequests",
+  "WorkerThreads": 4,
+  "ReplyTtlSeconds": 30,
+  "ReplyRecoverable": false,
+  "UseDeadLetterQueue": false,
+  "QueueMaxSizeKb": 0,
+  "QueueJournal": false,
+  "JournalMaxSizeKb": 0,
+  "QueueAuthenticate": false,
+  "QueueEncryption": "none",
+  "RequireAuthenticatedRequests": false,
+  "ApplyAclOnStartup": false,
+  "QueueAcl": []
 }

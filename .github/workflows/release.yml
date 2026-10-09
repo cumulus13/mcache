@@ -13,12 +13,17 @@ jobs:
 
   package:
     needs: ci
-    runs-on: windows-latest
+    name: package (${{ matrix.rid }}, ${{ matrix.mode }})
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     strategy:
       fail-fast: true
       matrix:
-        mode: [framework-dependent, self-contained]
+        include:
+          - { os: windows-latest, rid: win-x64,   mode: framework-dependent }
+          - { os: windows-latest, rid: win-x64,   mode: self-contained }
+          - { os: ubuntu-latest,  rid: linux-x64, mode: framework-dependent }
+          - { os: ubuntu-latest,  rid: linux-x64, mode: self-contained }
     steps:
       - uses: actions/checkout@v4
 
@@ -36,15 +41,16 @@ jobs:
       - name: Package
         shell: pwsh
         run: |
-          $p = @{ Version = '${{ steps.ver.outputs.version }}' }
+          $p = @{ Version = '${{ steps.ver.outputs.version }}'; Rid = '${{ matrix.rid }}' }
           if ('${{ matrix.mode }}' -eq 'self-contained') { $p.SelfContained = $true }
           ./scripts/package.ps1 @p
 
       - uses: actions/upload-artifact@v4
         with:
-          name: release-${{ matrix.mode }}
+          name: release-${{ matrix.rid }}-${{ matrix.mode }}
           path: |
             artifacts/*.zip
+            artifacts/*.tar.gz
             artifacts/*.sha256
           retention-days: 7
 

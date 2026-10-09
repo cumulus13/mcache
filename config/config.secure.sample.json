@@ -1,0 +1,14 @@
+{
+  "EnableTcp": true,
+  "BindAddress": "0.0.0.0",
+  "Port": 6379,
+  "Password": "CHANGE-ME-long-random-string",
+  "TlsEnabled": true,
+  "TlsCertificatePath": "certs\\server.pfx",
+  "TlsCertificatePassword": "pfx-password",
+  "MaxClients": 2000,
+  "IdleTimeoutSeconds": 600,
+  "DisabledCommands": ["FLUSHALL", "FLUSHDB", "CONFIG", "KEYS"],
+
+  "EnableMsmq": false
+}

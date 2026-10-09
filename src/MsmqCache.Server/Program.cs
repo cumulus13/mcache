@@ -20,7 +20,14 @@ var builder = Host.CreateApplicationBuilder(args);
 builder.Services.AddWindowsService(o => o.ServiceName = "MsmqCache");
 builder.Services.AddSingleton(cfg);
 builder.Services.AddSingleton(sp => new Store(cfg.Current));
+builder.Services.AddSingleton<ServerStats>();
 builder.Services.AddSingleton<CommandHandler>();
 builder.Services.AddHostedService<CacheServerService>();
-builder.Build().Run();
-return 0;
+
+try { builder.Build().Run(); }
+catch (Exception ex)
+{
+    Console.Error.WriteLine("Fatal: " + (ex.InnerException?.Message ?? ex.Message));
+    return 1;
+}
+return Environment.ExitCode;   // non-zero if a hosted service failed

@@ -1,93 +1,94 @@
-# MsmqCache
+# MsmqCache (mcached)
 
-Redis-like cache server over **MSMQ** for Windows / .NET 8. Request/reply over a private queue, TTL, exact LRU eviction,
-memory/key limits, atomic snapshots, runtime `CONFIG GET/SET`, Windows Service support.
+A **Redis-compatible cache server**: it listens on a **TCP port (default 6379)** and speaks **RESP2**, so `redis-cli` and
+ordinary Redis client libraries can talk to it. Strings only (no lists/hashes/sets yet). Optional **MSMQ** transport
+for Windows-only setups.
 
-- `mcached.exe` - server (console or Windows Service)
-- `mcache.exe` - CLI client (one-shot or REPL)
+- `mcached` - server (console, Windows Service, or systemd on Linux)
+- `mcache` - CLI client (TCP by default, `--msmq <queue>` for MSMQ)
 
-> Not Redis wire-compatible. Single store lock; throughput is bounded by MSMQ.
+Features: TTL, exact LRU eviction, memory / key limits, `AUTH` password, optional TLS, pipelining, idle timeout,
+max clients, atomic snapshots (persistence), runtime `CONFIG GET/SET`, disabled-command list.
+
+> Not a full Redis: no replication, clustering, pub/sub, transactions, Lua, ACL users, RESP3, or data types other than strings.
+> Keys and values are **UTF-8 text** (invalid UTF-8 is rejected, not silently altered). Single store lock; fast for a cache, not a Redis replacement for heavy workloads.
 
 ## Layout
 
 ```
-.github/workflows/   ci.yml  build.yml  release.yml
-src/Shared/          wire protocol (linked into server + client)
-src/MsmqCache.Server server (mcached)
-src/MsmqCache.Client client + CLI (mcache)
-tests/               xUnit tests for the store (no MSMQ required)
-config/              sample config.json / client.json
-scripts/             package.ps1, install-service.ps1, uninstall-service.ps1
+.github/workflows/   ci.yml  build.yml  release.yml  integration-msmq.yml
+src/MsmqCache.Protocol   request/response types (used by MSMQ transport + clients)
+src/MsmqCache.Server     mcached: store, RESP/TCP transport, MSMQ transport, host
+src/MsmqCache.Client     mcache CLI + TcpCacheClient + MsmqCacheClient
+tests/MsmqCache.Tests    unit tests + real-TCP integration tests (run everywhere)
+tests/MsmqCache.MsmqTests  MSMQ transport tests (skipped unless MSMQCACHE_MSMQ_TESTS=1)
+config/  scripts/  THIRD-PARTY-NOTICES.md  LICENSE
 ```
 
-## Requirements
+## Quick start
 
-- Windows with the MSMQ feature: `Enable-WindowsOptionalFeature -Online -FeatureName MSMQ-Server -All`
-- .NET 8 SDK to build; .NET 8 runtime to run the framework-dependent zip (self-contained zip needs nothing)
+```bash
+dotnet run --project src/MsmqCache.Server            # listens on 127.0.0.1:6379
+redis-cli -p 6379 SET hello "world" EX 60            # any Redis client works
+redis-cli -p 6379 GET hello
+dotnet run --project src/MsmqCache.Client -- GET hello   # bundled CLI
+python scripts/smoke_test.py --port 6379             # black-box RESP check of a running server
+```
+
+## Security defaults
+
+- Binds **127.0.0.1** only. To accept remote clients set `BindAddress` (e.g. `0.0.0.0`) **and** `Password`; the server logs a warning if you don't.
+- `Password` = Redis `requirepass` (`AUTH <pw>`); wrong attempts are delayed and the connection is dropped after 5.
+- `TlsEnabled` + `TlsCertificatePath` (.pfx) turns on TLS 1.2/1.3. Use `mcache --tls [--insecure]`.
+- `DisabledCommands` e.g. `["FLUSHALL","FLUSHDB","CONFIG","KEYS"]`.
+- The config file holds the password in clear text: restrict its file ACL.
+- `CONFIG GET` never reveals `password` / `tlscertificatepassword`.
+
+## Config (never read from the current directory)
+
+Lookup order: `--config <path>` -> env `MSMQCACHE_CONFIG` -> `%ProgramData%\MsmqCache\config.json` (if present) -> `<exe dir>\config.json`
+(created with defaults if missing). `DataDirectory` and `TlsCertificatePath` are relative to the **exe folder** and expand `%ENVVARS%`.
+Samples: `config/config.sample.json`, `config/config.secure.sample.json`, `config/client.sample.json`.
+
+Runtime (persisted to the file): `CONFIG SET maxmemorymb|maxkeys|evictionpolicy|defaultttlseconds|snapshotintervalseconds|persistenceenabled|password|maxclients|idletimeoutseconds|replyrecoverable|usedeadletterqueue <value>`.
+Other keys need a restart. `CONFIG GET *` lists all.
+
+## Commands
+
+`PING ECHO GET SET(EX|PX|NX|XX) SETNX SETEX PSETEX MGET MSET GETDEL APPEND STRLEN DEL UNLINK EXISTS INCR DECR INCRBY DECRBY EXPIRE PEXPIRE TTL PTTL PERSIST TYPE KEYS DBSIZE FLUSHDB FLUSHALL SAVE INFO CONFIG AUTH SELECT(0 only) CLIENT(SETNAME/GETNAME/ID/SETINFO) COMMAND QUIT`
+
+`KEYS` is O(n) and returns at most 10,000 keys. Some clients expect `redis_version` in `INFO`; it is intentionally not faked.
+
+## MSMQ transport (optional, Windows)
+
+Set `EnableMsmq: true`. Options: `RequestQueue`, `WorkerThreads`, `ReplyRecoverable`, `UseDeadLetterQueue`, `QueueMaxSizeKb`,
+`QueueJournal`/`JournalMaxSizeKb`, `QueueAuthenticate`, `QueueEncryption` (none|optional|body), `RequireAuthenticatedRequests`,
+`ApplyAclOnStartup` + `QueueAcl` (send|receive|full). Dead-letter and journal messages count against the machine quota: purge them.
+Authentication/encryption need a domain (AD) or internal certificates. Messages are limited to 4 MB. Local machine is the tested design.
 
 ## Build / test / package
 
 ```powershell
 dotnet build MsmqCache.sln -c Release
-dotnet test  MsmqCache.sln -c Release
-.\scripts\package.ps1 -Version 1.0.0            # artifacts\msmqcache-1.0.0-win-x64-framework-dependent.zip
-.\scripts\package.ps1 -Version 1.0.0 -SelfContained
+dotnet test  MsmqCache.sln -c Release          # includes real TCP tests
+.\scripts\package.ps1 -Version 1.0.0           # win-x64 zip
+.\scripts\package.ps1 -Version 1.0.0 -Rid linux-x64 -SelfContained   # tar.gz
 ```
 
-## Run
-
-```powershell
-.\server\mcached.exe                              # console
-.\scripts\install-service.ps1 -Dir C:\MsmqCache\server   # Windows Service (admin)
-
-.\client\mcache.exe SET user:1 "hello world" EX 60
-.\client\mcache.exe GET user:1
-.\client\mcache.exe INFO
-.\client\mcache.exe                               # REPL
-```
-
-## Config (never read from the current directory)
-
-Server lookup order:
-
-1. `--config <path>`
-2. env `MSMQCACHE_CONFIG`
-3. `%ProgramData%\MsmqCache\config.json` (if it exists)
-4. `<exe dir>\config.json` (created with defaults if missing)
-
-`DataDirectory` is relative to the exe folder and supports `%ENVVARS%`. Client uses the same order with
-`MSMQCACHE_CLIENT_CONFIG` / `client.json`; `--queue` and `--timeout` override.
-
-Runtime changes (persisted to the file): `CONFIG SET maxmemorymb|maxkeys|evictionpolicy|defaultttlseconds|snapshotintervalseconds|persistenceenabled <value>`.
-Other keys need a restart. `CONFIG GET *` lists everything.
-
-## Commands
-
-`PING GET SET(EX|PX|NX|XX) MGET MSET DEL EXISTS INCR DECR INCRBY DECRBY EXPIRE TTL PERSIST KEYS DBSIZE FLUSHALL SAVE INFO CONFIG`
-
-## Notes
-
-- **No auth in the protocol.** Access control = MSMQ queue ACL on `MsmqCacheRequests`. Use `DisabledCommands` to remove `FLUSHALL`, `CONFIG`, `KEYS`.
-- Messages are non-recoverable (fast). Durability = periodic + shutdown snapshots; a hard crash loses up to `SnapshotIntervalSeconds`.
-- MSMQ message cap is 4 MB; `KEYS` returns at most 10,000 keys.
-- Clients create a private reply queue per instance and delete it on dispose; a crashed client leaves `MsmqCacheReply_*` behind.
-- Local machine only is the supported/tested design.
+Windows service: `.\scripts\install-service.ps1 -Dir C:\MsmqCache\server [-OpenFirewall] [-EnableMsmq]`.
+Linux: see `scripts/mcached.service` (systemd).
 
 ## CI / release
 
-- `ci.yml` - restore, build, test on PRs (also reusable via `workflow_call`)
-- `build.yml` - on push to main: ci, then package (framework-dependent + self-contained) as workflow artifacts
-- `release.yml` - on tag `vX.Y.Z` (or `vX.Y.Z-rc.1` for prerelease): ci, package, then `gh release create` with zips + `.sha256`
-
-```
-git tag v1.0.0 && git push origin v1.0.0
-```
+- `ci.yml` - restore, build, test on Windows + Ubuntu (PRs; reusable via `workflow_call`)
+- `build.yml` - push to main: ci, then package win-x64 + linux-x64 (framework-dependent + self-contained)
+- `release.yml` - tag `vX.Y.Z` (`vX.Y.Z-rc.1` = prerelease): ci, package, `gh release create` with archives + `.sha256`
+- `integration-msmq.yml` - manual / weekly: enables MSMQ on a Windows runner and runs the MSMQ tests (not a release gate)
 
 ## License
 
-MIT
-
----
+MIT for this project. Dependency notices (Ms-RL for `Experimental.System.Messaging`, MIT for .NET) are in `THIRD-PARTY-NOTICES.md`
+and are shipped inside every release archive.
 
 ## 👤 Author
         

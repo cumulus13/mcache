@@ -1,7 +1,7 @@
-// File: src/MsmqCache.Client/CacheClient.cs
+// File: src/MsmqCache.Client/MsmqCacheClient.cs
 // Author: Hadi Cahyadi <cumulus13@gmail.com>
 // Date: 2026-10-09
-// Description: Synchronous MSMQ request/reply client with per-instance reply queue
+// Description: Optional MSMQ request/reply client with per-instance reply queue
 // License: MIT
 
 using System.Diagnostics;
@@ -9,22 +9,34 @@ using Experimental.System.Messaging;
 
 namespace MsmqCache;
 
-public sealed class CacheClientException : Exception { public CacheClientException(string m) : base(m) { } }
+public sealed class MsmqClientOptions
+{
+    public string RequestQueue { get; set; } = @".\Private$\MsmqCacheRequests";
+    public TimeSpan Timeout { get; set; } = TimeSpan.FromSeconds(5);
+    public bool Recoverable { get; set; }          // request messages are disk-backed (like your Publisher sample); slower
+    public bool UseAuthentication { get; set; }   // sign requests (needs domain/AD or internal certs); also attaches sender id
+    public bool UseEncryption { get; set; }        // encrypt request body (queue must allow it)
+}
 
-public sealed class CacheClient : IDisposable
+public sealed class MsmqCacheClient : ICacheClient
 {
     readonly MessageQueue _req, _reply;
     readonly string _replyPath;
     readonly TimeSpan _timeout;
+    readonly MsmqClientOptions _opt;
     readonly object _lock = new();
 
-    public CacheClient(string requestQueue, TimeSpan timeout)
+    public MsmqCacheClient(string requestQueue, TimeSpan timeout)
+        : this(new MsmqClientOptions { RequestQueue = requestQueue, Timeout = timeout }) { }
+
+    public MsmqCacheClient(MsmqClientOptions options)
     {
-        _timeout = timeout;
+        _opt = options;
+        _timeout = options.Timeout;
         _replyPath = $@".\Private$\MsmqCacheReply_{Guid.NewGuid():N}";
         _reply = MessageQueue.Create(_replyPath);
         _reply.Formatter = new XmlMessageFormatter(new[] { typeof(string) });
-        _req = new MessageQueue(requestQueue);
+        _req = new MessageQueue(options.RequestQueue);
     }
 
     public Response Execute(string cmd, params string[] args)
@@ -36,7 +48,10 @@ public sealed class CacheClient : IDisposable
             {
                 Body = Wire.Pack(req),
                 Label = cmd,
-                Recoverable = false,
+                Recoverable = _opt.Recoverable,
+                UseAuthentication = _opt.UseAuthentication,
+                AttachSenderId = _opt.UseAuthentication,
+                UseEncryption = _opt.UseEncryption,
                 TimeToBeReceived = _timeout,   // stale requests expire instead of piling up
                 ResponseQueue = _reply
             })
@@ -59,20 +74,6 @@ public sealed class CacheClient : IDisposable
             }
         }
     }
-
-    // typed helpers
-    static Response Check(Response r) => r.Kind == Kinds.Err ? throw new CacheClientException(r.Str ?? "error") : r;
-
-    public string? Get(string key) { var r = Check(Execute("GET", key)); return r.Kind == Kinds.Bulk ? r.Str : null; }
-
-    public bool Set(string key, string value, TimeSpan? ttl = null)
-    {
-        var args = ttl is { } t ? new[] { key, value, "PX", ((long)t.TotalMilliseconds).ToString() } : new[] { key, value };
-        return Check(Execute("SET", args)).Kind == Kinds.Ok;
-    }
-
-    public long Del(params string[] keys) => Check(Execute("DEL", keys)).Num;
-    public long Incr(string key) => Check(Execute("INCR", key)).Num;
 
     public void Dispose()
     {

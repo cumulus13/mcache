@@ -1,0 +1,45 @@
+name: integration-msmq
+
+# Exercises the optional MSMQ transport against a real MSMQ service on a Windows runner.
+# Not a release gate: the runner image must allow installing the MSMQ feature.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 3 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  msmq:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Enable and start MSMQ
+        shell: pwsh
+        run: |
+          $f = Get-WindowsOptionalFeature -Online -FeatureName MSMQ-Server -ErrorAction SilentlyContinue
+          if (-not $f -or $f.State -ne 'Enabled') {
+            Enable-WindowsOptionalFeature -Online -FeatureName MSMQ-Server -All -NoRestart | Out-Null
+          }
+          Start-Service MSMQ
+          Get-Service MSMQ
+
+      - name: Run MSMQ tests
+        env:
+          MSMQCACHE_MSMQ_TESTS: "1"
+        run: dotnet test tests/MsmqCache.MsmqTests -c Release --logger "trx;LogFileName=msmq.trx" --results-directory TestResults
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: msmq-test-results
+          path: TestResults
+          if-no-files-found: ignore

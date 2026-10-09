@@ -158,7 +158,7 @@ public sealed class Store
             if (nx && e != null) return false;
             if (xx && e == null) return false;
             if (ttlMs <= 0 && _cfg.DefaultTtlSeconds > 0) ttlMs = _cfg.DefaultTtlSeconds * 1000;
-            Put(key, value, ttlMs > 0 ? now + ttlMs : 0);
+            Put(key, value, ttlMs > 0 ? now + Math.Min(ttlMs, MaxTtlMs) : 0);
             return true;
         }
     }
@@ -205,17 +205,62 @@ public sealed class Store
         }
     }
 
-    public bool Expire(string key, long seconds)
+    const long MaxTtlMs = 100L * 365 * 24 * 3600 * 1000;   // clamp: avoids now+ttl overflow
+
+    public bool Expire(string key, long seconds) => ExpireMs(key, seconds >= MaxTtlMs / 1000 ? MaxTtlMs : seconds * 1000);
+
+    public bool ExpireMs(string key, long ms)
     {
         lock (_sync)
         {
             long now = Now();
             var e = Find(key, now);
             if (e == null) return false;
-            if (seconds <= 0) Remove(e);
-            else SetExpire(e, now + seconds * 1000);
+            if (ms <= 0) Remove(e);
+            else SetExpire(e, now + Math.Min(ms, MaxTtlMs));
             _dirty++;
             return true;
+        }
+    }
+
+    public long PTtl(string key)
+    {
+        lock (_sync)
+        {
+            long now = Now();
+            var e = Find(key, now);
+            if (e == null) return -2;
+            if (e.ExpireAt == 0) return -1;
+            return Math.Max(0, e.ExpireAt - now);
+        }
+    }
+
+    public string? GetDel(string key)
+    {
+        lock (_sync)
+        {
+            var e = Find(key, Now());
+            if (e == null) { _misses++; return null; }
+            _hits++;
+            var v = e.Value;
+            Remove(e); _dirty++;
+            return v;
+        }
+    }
+
+    // Returns the new length in UTF-8 bytes (Redis semantics).
+    public long Append(string key, string suffix)
+    {
+        lock (_sync)
+        {
+            long now = Now();
+            var e = Find(key, now);
+            string cur = e?.Value ?? "";
+            if ((long)cur.Length + suffix.Length > _cfg.MaxValueLength) throw new CacheException("value too large");
+            string next = cur + suffix;
+            long exp = e != null ? e.ExpireAt : (_cfg.DefaultTtlSeconds > 0 ? now + _cfg.DefaultTtlSeconds * 1000 : 0);
+            Put(key, next, exp);
+            return Encoding.UTF8.GetByteCount(next);
         }
     }
 

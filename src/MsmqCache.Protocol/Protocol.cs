@@ -1,4 +1,4 @@
-// File: src/Shared/Protocol.cs
+// File: src/MsmqCache.Protocol/Protocol.cs
 // Author: Hadi Cahyadi <cumulus13@gmail.com>
 // Date: 2026-10-09
 // Description: Wire protocol shared by server and client (JSON over MSMQ string bodies)

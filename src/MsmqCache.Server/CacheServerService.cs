@@ -1,12 +1,11 @@
 // File: src/MsmqCache.Server/CacheServerService.cs
 // Author: Hadi Cahyadi <cumulus13@gmail.com>
 // Date: 2026-10-09
-// Description: MSMQ worker loop, snapshot load/save, expiry sweeper (BackgroundService, Windows Service ready)
+// Description: Host: snapshot load/save, expiry sweeper, starts TCP and/or MSMQ transports
 // License: MIT
 
 using System.Diagnostics;
 using System.Text.Json;
-using Experimental.System.Messaging;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
@@ -18,16 +17,19 @@ public sealed class CacheServerService : BackgroundService
     readonly ConfigManager _cfg;
     readonly Store _store;
     readonly CommandHandler _handler;
+    readonly ServerStats _stats;
 
-    public CacheServerService(ILogger<CacheServerService> log, ConfigManager cfg, Store store, CommandHandler handler)
-    { _log = log; _cfg = cfg; _store = store; _handler = handler; }
+    public CacheServerService(ILogger<CacheServerService> log, ConfigManager cfg, Store store,
+                              CommandHandler handler, ServerStats stats)
+    { _log = log; _cfg = cfg; _store = store; _handler = handler; _stats = stats; }
 
-    protected override async Task ExecuteAsync(CancellationToken ct)
+    public int TcpPort => _stats.TcpPort;
+
+    protected override async Task ExecuteAsync(CancellationToken stopping)
     {
         await Task.Yield();   // don't block host startup
         var c = _cfg.Current;
         _log.LogInformation("Config: {File}", _cfg.FilePath);
-        EnsureQueue(c.RequestQueue);
 
         if (c.PersistenceEnabled)
         {
@@ -41,99 +43,37 @@ public sealed class CacheServerService : BackgroundService
             }
         }
 
-        var tasks = new List<Task>();
-        for (int i = 0; i < c.WorkerThreads; i++)
-        {
-            int id = i;
-            tasks.Add(Task.Factory.StartNew(() => WorkerLoop(id, ct), CancellationToken.None,
-                TaskCreationOptions.LongRunning, TaskScheduler.Default));
-        }
-        tasks.Add(Task.Run(() => Maintenance(ct), CancellationToken.None));
-        _log.LogInformation("Listening on {Q} with {N} workers", c.RequestQueue, c.WorkerThreads);
+        // If any transport dies at startup (port in use, bad ACL...), stop everything and fail the host.
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(stopping);
+        Exception? fatal = null;
 
-        await Task.WhenAll(tasks);
+        async Task Guard(string name, Func<Task> run)
+        {
+            try { await run().ConfigureAwait(false); }
+            catch (OperationCanceledException) when (cts.IsCancellationRequested) { }
+            catch (Exception ex)
+            {
+                _log.LogCritical(ex, "{Name} transport failed", name);
+                fatal ??= ex;
+                cts.Cancel();
+            }
+        }
+
+        var tasks = new List<Task> { Task.Run(() => Maintenance(cts.Token), CancellationToken.None) };
+        if (c.EnableTcp)
+            tasks.Add(Guard("TCP", () => new TcpTransport(_cfg, _handler, _stats, _log).RunAsync(cts.Token)));
+        if (c.EnableMsmq)
+            tasks.Add(Guard("MSMQ", () => MsmqTransport.Start(_cfg, _handler, _log, cts.Token)));
+
+        await Task.WhenAll(tasks).ConfigureAwait(false);
 
         if (_cfg.Current.PersistenceEnabled)
         {
             try { _store.Snapshot(_cfg.SnapshotPath, false); _log.LogInformation("Final snapshot written"); }
             catch (Exception ex) { _log.LogError(ex, "Final snapshot failed"); }
         }
-    }
 
-    static void EnsureQueue(string path)
-    {
-        if (!MessageQueue.Exists(path)) MessageQueue.Create(path);
-    }
-
-    void WorkerLoop(int id, CancellationToken ct)
-    {
-        while (!ct.IsCancellationRequested)
-        {
-            MessageQueue? q = null;
-            try
-            {
-                EnsureQueue(_cfg.Current.RequestQueue);
-                // MessageQueue instances are not thread-safe: one per worker.
-                q = new MessageQueue(_cfg.Current.RequestQueue)
-                {
-                    Formatter = new XmlMessageFormatter(new[] { typeof(string) })
-                };
-                while (!ct.IsCancellationRequested)
-                {
-                    Message msg;
-                    try { msg = q.Receive(TimeSpan.FromSeconds(1)); }
-                    catch (MessageQueueException ex) when (ex.MessageQueueErrorCode == MessageQueueErrorCode.IOTimeout) { continue; }
-                    using (msg) Handle(msg);
-                }
-            }
-            catch (Exception ex)
-            {
-                _log.LogError(ex, "Worker {Id} error; retrying in 2s", id);
-                ct.WaitHandle.WaitOne(2000);
-            }
-            finally { q?.Dispose(); }
-        }
-    }
-
-    void Handle(Message msg)
-    {
-        Request? req = null;
-        Response resp;
-        try
-        {
-            req = Wire.Unpack<Request>((string)msg.Body) ?? throw new JsonException("null request");
-            resp = _handler.Execute(req);
-        }
-        catch (Exception ex)
-        {
-            _log.LogWarning("Malformed request: {Msg}", ex.Message);
-            resp = Response.Error("malformed request");
-        }
-        resp.Id = req?.Id ?? "";
-
-        MessageQueue? rq = msg.ResponseQueue;
-        if (rq == null) return;   // fire-and-forget request
-        using (rq)
-        {
-            try { SendReply(rq, resp); }
-            catch (MessageQueueException ex)
-            {
-                _log.LogWarning("Reply failed: {Code}", ex.MessageQueueErrorCode);
-                try { SendReply(rq, new Response { Id = resp.Id, Kind = Kinds.Err, Str = "reply failed: " + ex.MessageQueueErrorCode }); } catch { }
-            }
-        }
-    }
-
-    void SendReply(MessageQueue rq, Response r)
-    {
-        using var m = new Message
-        {
-            Body = Wire.Pack(r),
-            Label = "resp",
-            Recoverable = false,
-            TimeToBeReceived = TimeSpan.FromSeconds(_cfg.Current.ReplyTtlSeconds)
-        };
-        rq.Send(m);
+        if (fatal != null) throw fatal;   // makes the host exit non-zero / service report failure
     }
 
     void Maintenance(CancellationToken ct)

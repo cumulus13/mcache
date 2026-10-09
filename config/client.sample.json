@@ -1,4 +1,14 @@
 {
-  "RequestQueue": ".\\Private$\\MsmqCacheRequests",
-  "TimeoutSeconds": 5
+  "Transport": "tcp",
+  "Host": "127.0.0.1",
+  "Port": 6379,
+  "Password": "",
+  "Tls": false,
+  "TlsAllowUntrusted": false,
+  "TimeoutSeconds": 5,
+
+  "MsmqQueue": ".\\Private$\\MsmqCacheRequests",
+  "Recoverable": false,
+  "UseAuthentication": false,
+  "UseEncryption": false
 }
