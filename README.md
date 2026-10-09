@@ -11,7 +11,9 @@ Features: TTL, exact LRU eviction, memory / key limits, `AUTH` password, optiona
 max clients, atomic snapshots (persistence), runtime `CONFIG GET/SET`, disabled-command list.
 
 > Not a full Redis: no replication, clustering, pub/sub, transactions, Lua, ACL users, RESP3, or data types other than strings.
-> Keys and values are **UTF-8 text** (invalid UTF-8 is rejected, not silently altered). Single store lock; fast for a cache, not a Redis replacement for heavy workloads.
+> Keys and values are **UTF-8 text** (invalid UTF-8 is rejected, not silently altered): raw binary such as pickle, msgpack or images must be base64-encoded first, see [Binary data, pickle](#binary-data-pickle-and-other-serializers). Single store lock; fast for a cache, not a Redis replacement for heavy workloads.
+
+Full operator guide (architecture, config reference, security checklist, operations, licensing): [`docs/PRODUCTION_GUIDE.md`](docs/PRODUCTION_GUIDE.md).
 
 ## Layout
 
@@ -22,7 +24,7 @@ src/MsmqCache.Server     mcached: store, RESP/TCP transport, MSMQ transport, hos
 src/MsmqCache.Client     mcache CLI + TcpCacheClient + MsmqCacheClient
 tests/MsmqCache.Tests    unit tests + real-TCP integration tests (run everywhere)
 tests/MsmqCache.MsmqTests  MSMQ transport tests (skipped unless MSMQCACHE_MSMQ_TESTS=1)
-config/  scripts/  THIRD-PARTY-NOTICES.md  LICENSE
+config/  scripts/  docs/PRODUCTION_GUIDE.md  THIRD-PARTY-NOTICES.md  LICENSE
 ```
 
 ## Quick start
@@ -58,6 +60,38 @@ Other keys need a restart. `CONFIG GET *` lists all.
 `PING ECHO GET SET(EX|PX|NX|XX) SETNX SETEX PSETEX MGET MSET GETDEL APPEND STRLEN DEL UNLINK EXISTS INCR DECR INCRBY DECRBY EXPIRE PEXPIRE TTL PTTL PERSIST TYPE KEYS DBSIZE FLUSHDB FLUSHALL SAVE INFO CONFIG AUTH SELECT(0 only) CLIENT(SETNAME/GETNAME/ID/SETINFO) COMMAND QUIT`
 
 `KEYS` is O(n) and returns at most 10,000 keys. Some clients expect `redis_version` in `INFO`; it is intentionally not faked.
+
+## Binary data, pickle and other serializers
+
+Values are **UTF-8 text**, not arbitrary bytes. A `SET` whose value is not valid UTF-8 is rejected with
+`-ERR Protocol error: value is not valid UTF-8 ...` and the server **closes that connection**. It never stores a corrupted value.
+
+| Value format | Works today? | Note |
+|---|---|---|
+| Plain text, JSON | Yes | Recommended for most uses |
+| Base64 (or hex) of any bytes: pickle, msgpack, protobuf, compressed data, images | Yes | ~33% larger; `MaxValueLength` counts the encoded characters |
+| Raw pickle (protocol 1+), msgpack, protobuf, gzip, images | **No** | Rejected as described above |
+| Pickle protocol 0 (ASCII only) | Technically yes | Not recommended |
+
+Python example (pickle through base64):
+
+```python
+import base64, pickle, redis
+
+r = redis.Redis(host="127.0.0.1", port=6379)   # add password=... if set
+
+def put(key, obj, ex=None):
+    r.set(key, base64.b64encode(pickle.dumps(obj, protocol=5)).decode("ascii"), ex=ex)
+
+def get(key):
+    v = r.get(key)
+    return None if v is None else pickle.loads(base64.b64decode(v))
+```
+
+**Security:** `pickle.loads` executes arbitrary code. Only unpickle data from a cache nobody untrusted can write to: keep the server on
+loopback, or protect it with `Password` + TLS. JSON or msgpack is safer for shared caches.
+
+**Planned:** binary-safe values (raw bytes round-trip unchanged, as in Redis). Until then, encode to text as shown.
 
 ## MSMQ transport (optional, Windows)
 

@@ -28,7 +28,7 @@ foreach ($p in @("Server", "Client")) {
 }
 
 Copy-Item "$root/config" "$stage/config" -Recurse
-$extra = @("$root/README.md", "$root/LICENSE", "$root/THIRD-PARTY-NOTICES.md")
+$extra = @("$root/README.md", "$root/LICENSE", "$root/THIRD-PARTY-NOTICES.md", "$root/docs/PRODUCTION_GUIDE.md")
 if ($Rid -like "win-*")   { $extra += "$root/scripts/install-service.ps1", "$root/scripts/uninstall-service.ps1" }
 if ($Rid -like "linux-*") { $extra += "$root/scripts/mcached.service" }
 Copy-Item $extra $stage
