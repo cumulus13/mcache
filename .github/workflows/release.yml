@@ -25,7 +25,7 @@ jobs:
           - { os: ubuntu-latest,  rid: linux-x64, mode: framework-dependent }
           - { os: ubuntu-latest,  rid: linux-x64, mode: self-contained }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-dotnet@v4
         with:
