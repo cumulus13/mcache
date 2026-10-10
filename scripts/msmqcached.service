@@ -1,0 +1,22 @@
+# /etc/systemd/system/msmqcached.service  (Linux: TCP/RESP transport only; MSMQ is Windows-only)
+[Unit]
+Description=msmqcached - Redis-compatible cache server
+After=network.target
+
+[Service]
+Type=simple
+User=msmqcached
+Group=msmqcached
+ExecStart=/opt/msmqcached/server/msmqcached --config /etc/msmqcached/config.json
+Restart=on-failure
+RestartSec=2
+LimitNOFILE=65535
+# hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/msmqcached /etc/msmqcached
+
+[Install]
+WantedBy=multi-user.target

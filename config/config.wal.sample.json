@@ -1,0 +1,18 @@
+{
+  "EnableTcp": true,
+  "BindAddress": "127.0.0.1",
+  "Port": 6379,
+  "PersistenceEnabled": true,
+  "SnapshotIntervalSeconds": 300,
+
+  "WalEnabled": true,
+  "WalQueue": ".\\Private$\\msmqcache_wal",
+  "WalMode": "sync",
+  "WalBatchMax": 500,
+  "WalSyncTimeoutMs": 5000,
+  "WalMaxBacklog": 200000,
+  "WalCheckpointEntries": 100000,
+  "WalQueueMaxSizeKb": 0,
+  "WalSkipCorrupt": false,
+  "MaxValueLength": 250000
+}

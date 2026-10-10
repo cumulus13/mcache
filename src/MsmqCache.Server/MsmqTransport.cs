@@ -76,7 +76,7 @@ public sealed class MsmqTransport
             req = Wire.Unpack<Request>((string)msg.Body) ?? throw new JsonException("null request");
             resp = _cfg.Current.RequireAuthenticatedRequests && !IsAuthenticated(msg)
                 ? Response.Error("authentication required")
-                : _handler.Execute(req);
+                : _handler.ExecuteAsync(req, CancellationToken.None).GetAwaiter().GetResult();
         }
         catch (Exception ex)
         {

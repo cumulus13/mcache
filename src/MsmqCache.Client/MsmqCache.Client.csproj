@@ -2,7 +2,7 @@
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <TargetFramework>net8.0</TargetFramework>
-    <AssemblyName>mcache</AssemblyName>
+    <AssemblyName>msmqcache</AssemblyName>
     <RootNamespace>MsmqCache</RootNamespace>
   </PropertyGroup>
   <ItemGroup>

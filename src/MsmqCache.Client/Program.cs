@@ -1,7 +1,7 @@
 // File: src/MsmqCache.Client/Program.cs
 // Author: Hadi Cahyadi <cumulus13@gmail.com>
 // Date: 2026-10-09
-// Description: CLI (mcache): TCP/RESP by default, optional MSMQ transport; one-shot and REPL
+// Description: CLI (msmqcache): TCP/RESP by default, optional MSMQ transport; one-shot and REPL
 // License: MIT
 
 using System.Text;
@@ -47,7 +47,7 @@ try
     {
         string target = cc.Transport.Equals("msmq", StringComparison.OrdinalIgnoreCase) ? cc.MsmqQueue : $"{cc.Host}:{cc.Port}";
 
-        if (rest.Count > 0)   // one-shot: mcache SET foo bar EX 60
+        if (rest.Count > 0)   // one-shot: msmqcache SET foo bar EX 60
             return Print(client.Execute(rest[0], rest.Skip(1).ToArray()));
 
         Console.WriteLine($"=== MCACHE CLI ({target}) ===  type 'exit' to quit\n");
@@ -77,7 +77,7 @@ catch (Exception ex)
 }
 
 static void Usage() => Console.WriteLine("""
-    mcache [options] [COMMAND args...]
+    msmqcache [options] [COMMAND args...]
       -h, --host <host>        default 127.0.0.1
       -p, --port <port>        default 6379
       -a, --password <pw>      or env MSMQCACHE_PASSWORD

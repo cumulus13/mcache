@@ -1,128 +1,103 @@
-# MsmqCache (mcached)
+# msmqcache
 
-A **Redis-compatible cache server**: it listens on a **TCP port (default 6379)** and speaks **RESP2**, so `redis-cli` and
-ordinary Redis client libraries can talk to it. Strings only (no lists/hashes/sets yet). Optional **MSMQ** transport
-for Windows-only setups.
+A **Redis-compatible cache server for .NET 8 that uses MSMQ as its durability and replication backend.**
 
-- `mcached` - server (console, Windows Service, or systemd on Linux)
-- `mcache` - CLI client (TCP by default, `--msmq <queue>` for MSMQ)
+- Clients use **TCP (default port 6379)** with `redis-cli` or any Redis library (RESP2). Strings only: TTL, LRU, memory limits, snapshots, `AUTH`, optional TLS, pipelining, pub/sub.
+- **MSMQ is the backend**: write-ahead log (transactional queues, replayed at startup), replication to replicas (store-and-forward, exactly-once, full-resync fallback), pub/sub forwarding, plus an optional request/reply queue door for Windows clients.
+- MSMQ is *not* the key/value store: a queue has no lookup by key, no in-place update and no per-key TTL.
 
-Features: TTL, exact LRU eviction, memory / key limits, `AUTH` password, optional TLS, pipelining, idle timeout,
-max clients, atomic snapshots (persistence), runtime `CONFIG GET/SET`, disabled-command list.
+> **Status:** syntax-checked and test-covered, but never compiled or run (the build sandbox had no .NET SDK, and MSMQ is Windows-only). Build, run the tests, and read [`docs/PRODUCTION_GUIDE.md`](docs/PRODUCTION_GUIDE.md) before relying on it.
 
-> Not a full Redis: no replication, clustering, pub/sub, transactions, Lua, ACL users, RESP3, or data types other than strings.
-> Keys and values are **UTF-8 text** (invalid UTF-8 is rejected, not silently altered): raw binary such as pickle, msgpack or images must be base64-encoded first, see [Binary data, pickle](#binary-data-pickle-and-other-serializers). Single store lock; fast for a cache, not a Redis replacement for heavy workloads.
+- `msmqcached` - server (console, Windows Service, systemd on Linux for TCP-only)
+- `msmqcache` - CLI (TCP by default, `--msmq <queue>` for the queue door)
 
-Full operator guide (architecture, config reference, security checklist, operations, licensing): [`docs/PRODUCTION_GUIDE.md`](docs/PRODUCTION_GUIDE.md).
+## Quick start
+
+```powershell
+dotnet run --project src/MsmqCache.Server            # 127.0.0.1:6379, in-memory + snapshots
+redis-cli -p 6379 SET hello world EX 60
+redis-cli -p 6379 GET hello
+python scripts/smoke_test.py --port 6379             # black-box RESP check (incl. pub/sub)
+```
+
+## Use MSMQ as the backend
+
+Enable the MSMQ feature once (`Enable-WindowsOptionalFeature -Online -FeatureName MSMQ-Server -All`), then:
+
+**Durable (write-ahead log)** - `config/config.wal.sample.json`
+
+```json
+{ "PersistenceEnabled": true, "WalEnabled": true, "WalMode": "sync", "MaxValueLength": 250000 }
+```
+
+`sync` replies after the MSMQ transaction commits; `async` replies immediately and logs in the background. Restart replays the log on top of the last snapshot.
+
+**Replication** - `config/config.primary.sample.json` and `config/config.replica.sample.json`. Start the primary first, then the replicas. Replicas are read-only and full-sync automatically when they are new or miss entries. `ReplicaAdvertisedQueue` (replica) must equal the primary's `Replicas` entry.
+
+**Pub/Sub** - `SUBSCRIBE` / `UNSUBSCRIBE` / `PUBLISH`; `PUBLISH` is forwarded to replicas over MSMQ.
+
+## Security defaults
+
+- Binds **127.0.0.1**. For remote access set `BindAddress` **and** `Password` (and TLS); the server warns otherwise.
+- `Password` = Redis `requirepass`; wrong attempts are delayed and the connection is dropped after 5. `CONFIG GET` hides passwords.
+- `DisabledCommands`, MSMQ queue ACLs (`QueueAcl`), `ReplicationAuthenticate/Encrypt` - see the guide. Restrict who can write to the control and replication queues.
+
+## Binary data, pickle and other serializers
+
+Values are **UTF-8 text**. A `SET` with invalid UTF-8 is rejected (`-ERR Protocol error`) and the connection is closed. Raw pickle (protocol 1+), msgpack, protobuf, gzip and images must be **base64-encoded** first:
+
+```python
+import base64, pickle, redis
+r = redis.Redis(host="127.0.0.1", port=6379)
+def put(key, obj, ex=None): r.set(key, base64.b64encode(pickle.dumps(obj, protocol=5)).decode("ascii"), ex=ex)
+def get(key):
+    v = r.get(key); return None if v is None else pickle.loads(base64.b64decode(v))
+```
+
+`pickle.loads` executes arbitrary code: only unpickle from a cache nobody untrusted can write to. Planned: binary-safe values.
+
+## Commands
+
+`PING ECHO GET SET(EX PX EXAT PXAT NX XX) SETNX SETEX PSETEX MGET MSET GETDEL APPEND STRLEN DEL UNLINK EXISTS INCR DECR INCRBY DECRBY EXPIRE PEXPIRE EXPIREAT PEXPIREAT TTL PTTL PERSIST TYPE KEYS DBSIZE FLUSHDB FLUSHALL SAVE INFO CONFIG AUTH SELECT(0) CLIENT COMMAND PUBLISH SUBSCRIBE UNSUBSCRIBE QUIT`
+
+Not supported: lists, hashes, sets, `PSUBSCRIBE`, transactions, Lua, RESP3, cluster, ACL users, automatic failover.
+
+## Config (never read from the current directory)
+
+`--config <path>` -> env `MSMQCACHE_CONFIG` -> `%ProgramData%\MsmqCache\config.json` -> `<exe dir>\config.json` (created with defaults). Relative `DataDirectory` / `TlsCertificatePath` resolve against the exe folder. Samples: `config/`. Runtime `CONFIG SET` (persisted): `maxmemorymb maxkeys evictionpolicy defaultttlseconds snapshotintervalseconds persistenceenabled password maxclients idletimeoutseconds replyrecoverable usedeadletterqueue`.
 
 ## Layout
 
 ```
-.github/workflows/   ci.yml  build.yml  release.yml  integration-msmq.yml
-src/MsmqCache.Protocol   request/response types (used by MSMQ transport + clients)
-src/MsmqCache.Server     mcached: store, RESP/TCP transport, MSMQ transport, host
-src/MsmqCache.Client     mcache CLI + TcpCacheClient + MsmqCacheClient
-tests/MsmqCache.Tests    unit tests + real-TCP integration tests (run everywhere)
-tests/MsmqCache.MsmqTests  MSMQ transport tests (skipped unless MSMQCACHE_MSMQ_TESTS=1)
+.github/workflows/  ci  build  release  integration-msmq
+src/MsmqCache.Protocol  request/response types
+src/MsmqCache.Server    store, RESP/TCP, pub/sub, MSMQ WAL + replication, MSMQ request transport, host
+src/MsmqCache.Client    msmqcache CLI, TcpCacheClient, MsmqCacheClient
+tests/MsmqCache.Tests       unit, handler, WAL-log semantics, real-TCP tests (run everywhere)
+tests/MsmqCache.MsmqTests   WAL / replication / queue tests (MSMQCACHE_MSMQ_TESTS=1, Windows + MSMQ)
 config/  scripts/  docs/PRODUCTION_GUIDE.md  THIRD-PARTY-NOTICES.md  LICENSE
 ```
-
-## Quick start
-
-```bash
-dotnet run --project src/MsmqCache.Server            # listens on 127.0.0.1:6379
-redis-cli -p 6379 SET hello "world" EX 60            # any Redis client works
-redis-cli -p 6379 GET hello
-dotnet run --project src/MsmqCache.Client -- GET hello   # bundled CLI
-python scripts/smoke_test.py --port 6379             # black-box RESP check of a running server
-```
-
-## Security defaults
-
-- Binds **127.0.0.1** only. To accept remote clients set `BindAddress` (e.g. `0.0.0.0`) **and** `Password`; the server logs a warning if you don't.
-- `Password` = Redis `requirepass` (`AUTH <pw>`); wrong attempts are delayed and the connection is dropped after 5.
-- `TlsEnabled` + `TlsCertificatePath` (.pfx) turns on TLS 1.2/1.3. Use `mcache --tls [--insecure]`.
-- `DisabledCommands` e.g. `["FLUSHALL","FLUSHDB","CONFIG","KEYS"]`.
-- The config file holds the password in clear text: restrict its file ACL.
-- `CONFIG GET` never reveals `password` / `tlscertificatepassword`.
-
-## Config (never read from the current directory)
-
-Lookup order: `--config <path>` -> env `MSMQCACHE_CONFIG` -> `%ProgramData%\MsmqCache\config.json` (if present) -> `<exe dir>\config.json`
-(created with defaults if missing). `DataDirectory` and `TlsCertificatePath` are relative to the **exe folder** and expand `%ENVVARS%`.
-Samples: `config/config.sample.json`, `config/config.secure.sample.json`, `config/client.sample.json`.
-
-Runtime (persisted to the file): `CONFIG SET maxmemorymb|maxkeys|evictionpolicy|defaultttlseconds|snapshotintervalseconds|persistenceenabled|password|maxclients|idletimeoutseconds|replyrecoverable|usedeadletterqueue <value>`.
-Other keys need a restart. `CONFIG GET *` lists all.
-
-## Commands
-
-`PING ECHO GET SET(EX|PX|NX|XX) SETNX SETEX PSETEX MGET MSET GETDEL APPEND STRLEN DEL UNLINK EXISTS INCR DECR INCRBY DECRBY EXPIRE PEXPIRE TTL PTTL PERSIST TYPE KEYS DBSIZE FLUSHDB FLUSHALL SAVE INFO CONFIG AUTH SELECT(0 only) CLIENT(SETNAME/GETNAME/ID/SETINFO) COMMAND QUIT`
-
-`KEYS` is O(n) and returns at most 10,000 keys. Some clients expect `redis_version` in `INFO`; it is intentionally not faked.
-
-## Binary data, pickle and other serializers
-
-Values are **UTF-8 text**, not arbitrary bytes. A `SET` whose value is not valid UTF-8 is rejected with
-`-ERR Protocol error: value is not valid UTF-8 ...` and the server **closes that connection**. It never stores a corrupted value.
-
-| Value format | Works today? | Note |
-|---|---|---|
-| Plain text, JSON | Yes | Recommended for most uses |
-| Base64 (or hex) of any bytes: pickle, msgpack, protobuf, compressed data, images | Yes | ~33% larger; `MaxValueLength` counts the encoded characters |
-| Raw pickle (protocol 1+), msgpack, protobuf, gzip, images | **No** | Rejected as described above |
-| Pickle protocol 0 (ASCII only) | Technically yes | Not recommended |
-
-Python example (pickle through base64):
-
-```python
-import base64, pickle, redis
-
-r = redis.Redis(host="127.0.0.1", port=6379)   # add password=... if set
-
-def put(key, obj, ex=None):
-    r.set(key, base64.b64encode(pickle.dumps(obj, protocol=5)).decode("ascii"), ex=ex)
-
-def get(key):
-    v = r.get(key)
-    return None if v is None else pickle.loads(base64.b64decode(v))
-```
-
-**Security:** `pickle.loads` executes arbitrary code. Only unpickle data from a cache nobody untrusted can write to: keep the server on
-loopback, or protect it with `Password` + TLS. JSON or msgpack is safer for shared caches.
-
-**Planned:** binary-safe values (raw bytes round-trip unchanged, as in Redis). Until then, encode to text as shown.
-
-## MSMQ transport (optional, Windows)
-
-Set `EnableMsmq: true`. Options: `RequestQueue`, `WorkerThreads`, `ReplyRecoverable`, `UseDeadLetterQueue`, `QueueMaxSizeKb`,
-`QueueJournal`/`JournalMaxSizeKb`, `QueueAuthenticate`, `QueueEncryption` (none|optional|body), `RequireAuthenticatedRequests`,
-`ApplyAclOnStartup` + `QueueAcl` (send|receive|full). Dead-letter and journal messages count against the machine quota: purge them.
-Authentication/encryption need a domain (AD) or internal certificates. Messages are limited to 4 MB. Local machine is the tested design.
 
 ## Build / test / package
 
 ```powershell
-dotnet build MsmqCache.sln -c Release
-dotnet test  MsmqCache.sln -c Release          # includes real TCP tests
-.\scripts\package.ps1 -Version 1.0.0           # win-x64 zip
-.\scripts\package.ps1 -Version 1.0.0 -Rid linux-x64 -SelfContained   # tar.gz
+dotnet build msmqcache.sln -c Release
+dotnet test  msmqcache.sln -c Release                       # MSMQ tests are skipped by default
+$env:MSMQCACHE_MSMQ_TESTS = "1"; dotnet test tests/MsmqCache.MsmqTests -c Release
+.\scripts\package.ps1 -Version 1.0.0                        # win-x64 zip
+.\scripts\package.ps1 -Version 1.0.0 -Rid linux-x64 -SelfContained
 ```
 
-Windows service: `.\scripts\install-service.ps1 -Dir C:\MsmqCache\server [-OpenFirewall] [-EnableMsmq]`.
-Linux: see `scripts/mcached.service` (systemd).
+Windows service: `.\scripts\install-service.ps1 -Dir C:\msmqcache\server [-EnableMsmq] [-OpenFirewall]`. Linux: `scripts/msmqcached.service`.
 
 ## CI / release
 
-- `ci.yml` - restore, build, test on Windows + Ubuntu (PRs; reusable via `workflow_call`)
-- `build.yml` - push to main: ci, then package win-x64 + linux-x64 (framework-dependent + self-contained)
-- `release.yml` - tag `vX.Y.Z` (`vX.Y.Z-rc.1` = prerelease): ci, package, `gh release create` with archives + `.sha256`
-- `integration-msmq.yml` - manual / weekly: enables MSMQ on a Windows runner and runs the MSMQ tests (not a release gate)
+`ci` (build + test on Windows and Ubuntu) | `build` (push to main: package win-x64 + linux-x64) | `release` (tag `vX.Y.Z`; `-rc` = prerelease) | `integration-msmq` (manual / weekly: enables MSMQ on a Windows runner and runs the MSMQ tests; not a release gate).
 
 ## License
 
-MIT for this project. Dependency notices (Ms-RL for `Experimental.System.Messaging`, MIT for .NET) are in `THIRD-PARTY-NOTICES.md`
-and are shipped inside every release archive.
+MIT. Dependency notices (Ms-RL for `Experimental.System.Messaging`, MIT for .NET) are in `THIRD-PARTY-NOTICES.md`, shipped in every release archive.
+
 
 ## 👤 Author
         

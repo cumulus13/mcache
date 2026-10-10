@@ -12,5 +12,7 @@ public sealed class ServerStats
     public long TotalConnections;
     public long RejectedConnections;
     public long NextClientId;
+    public long ReplicationNacks;
+    public long WalErrors;
     public volatile int TcpPort;     // actual bound port (useful when Port = 0)
 }

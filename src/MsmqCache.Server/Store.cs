@@ -24,9 +24,18 @@ public sealed class SnapEntry
     public long E { get; set; }   // absolute unix ms, 0 = none
 }
 
+public sealed class SnapshotFile
+{
+    public long Seq { get; set; }          // last write sequence contained in this snapshot
+    public int WalSegment { get; set; }    // first WAL segment that may hold newer entries
+    public List<SnapEntry> Entries { get; set; } = new();
+}
+
 public sealed class Store
 {
     const int MaxKeysReturned = 10_000;
+    const long MaxTtlMs = 100L * 365 * 24 * 3600 * 1000;   // clamp: avoids now+ttl overflow
+    static readonly CultureInfo Inv = CultureInfo.InvariantCulture;
 
     sealed class Entry
     {
@@ -44,6 +53,11 @@ public sealed class Store
         }
     }
 
+    // Normal: client write, assigns the next sequence and is logged + replicated.
+    // Replicated: applying a primary's entry on a replica; keeps the primary's sequence, logged locally, NOT re-replicated.
+    // Replay: loading from snapshot / WAL; nothing is emitted.
+    enum Mode { Normal, Replicated, Replay }
+
     readonly ServerConfig _cfg;
     readonly object _sync = new();       // guards all state (single lock = simple + correct)
     readonly object _snapSync = new();   // serialises snapshot writers
@@ -52,14 +66,33 @@ public sealed class Store
     readonly SortedSet<(long At, string Key)> _ttl = new(new TtlCmp());
     readonly long _startMs = Now();
     long _used, _dirty, _savedDirty, _hits, _misses, _expired, _evicted, _lastSaveMs;
+    long _seq, _savedSeq, _forcedSeq;
+    Mode _mode = Mode.Normal;
+    IWriteSink? _sink;
     public long Commands;
+
+    public event Action? SnapshotInstalled;
 
     public Store(ServerConfig cfg) => _cfg = cfg;
 
     public static long Now() => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
     static long SizeOf(string k, string v) => 2L * (k.Length + v.Length) + 96;
 
+    public long Seq => Interlocked.Read(ref _seq);
+    public long SeqSinceSnapshot => Seq - Interlocked.Read(ref _savedSeq);
+    public int LoadedWalSegment { get; private set; }
+
+    public void SetSink(IWriteSink? sink) { lock (_sync) _sink = sink; }
+
     // ---- internals (call under _sync) ----
+    void Emit(string cmd, params string[] args)
+    {
+        if (_mode == Mode.Replay) return;
+        bool replicated = _mode == Mode.Replicated;
+        long seq = replicated ? _forcedSeq : Interlocked.Increment(ref _seq);
+        _sink?.Append(new LogEntry { Seq = seq, Cmd = cmd, Args = args }, replicate: !replicated);
+    }
+
     Entry? Find(string key, long now)
     {
         if (!_map.TryGetValue(key, out var e)) return null;
@@ -94,7 +127,7 @@ public sealed class Store
         while (Over() && node != null)
         {
             var prev = node.Previous;
-            if (node.Value.Key != protect) { Remove(node.Value); _evicted++; }
+            if (node.Value.Key != protect) { Remove(node.Value); _evicted++; }   // evictions are local: not logged
             node = prev;
         }
         if (Over()) throw new OomException();
@@ -120,6 +153,28 @@ public sealed class Store
         e.Size = newSize;
         SetExpire(e, expireAt);
         _dirty++;
+        if (expireAt == 0) Emit("SET", key, value);
+        else Emit("SET", key, value, "PXAT", expireAt.ToString(Inv));
+    }
+
+    bool DelLocked(string key, long now)
+    {
+        var e = Find(key, now);
+        if (e == null) return false;
+        Remove(e); _dirty++;
+        Emit("DEL", key);
+        return true;
+    }
+
+    bool ExpireAtLocked(string key, long absMs, long now)
+    {
+        var e = Find(key, now);
+        if (e == null) return false;
+        if (absMs <= now) { Remove(e); _dirty++; Emit("DEL", key); return true; }
+        long at = Math.Min(absMs, now + MaxTtlMs);
+        SetExpire(e, at); _dirty++;
+        Emit("PEXPIREAT", key, at.ToString(Inv));
+        return true;
     }
 
     // ---- public API ----
@@ -163,16 +218,26 @@ public sealed class Store
         }
     }
 
+    public string? GetDel(string key)
+    {
+        lock (_sync)
+        {
+            long now = Now();
+            var e = Find(key, now);
+            if (e == null) { _misses++; return null; }
+            _hits++;
+            var v = e.Value;
+            DelLocked(key, now);
+            return v;
+        }
+    }
+
     public int Del(string[] keys)
     {
         lock (_sync)
         {
             long now = Now(); int n = 0;
-            foreach (var k in keys)
-            {
-                var e = Find(k, now);
-                if (e != null) { Remove(e); n++; _dirty++; }
-            }
+            foreach (var k in keys) if (DelLocked(k, now)) n++;
             return n;
         }
     }
@@ -194,57 +259,14 @@ public sealed class Store
             long now = Now();
             var e = Find(key, now);
             long cur = 0;
-            if (e != null && !long.TryParse(e.Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out cur))
+            if (e != null && !long.TryParse(e.Value, NumberStyles.Integer, Inv, out cur))
                 throw new CacheException("value is not an integer or out of range");
             long next;
             try { next = checked(cur + delta); }
             catch (OverflowException) { throw new CacheException("increment or decrement would overflow"); }
             long exp = e != null ? e.ExpireAt : (_cfg.DefaultTtlSeconds > 0 ? now + _cfg.DefaultTtlSeconds * 1000 : 0);
-            Put(key, next.ToString(CultureInfo.InvariantCulture), exp);
+            Put(key, next.ToString(Inv), exp);
             return next;
-        }
-    }
-
-    const long MaxTtlMs = 100L * 365 * 24 * 3600 * 1000;   // clamp: avoids now+ttl overflow
-
-    public bool Expire(string key, long seconds) => ExpireMs(key, seconds >= MaxTtlMs / 1000 ? MaxTtlMs : seconds * 1000);
-
-    public bool ExpireMs(string key, long ms)
-    {
-        lock (_sync)
-        {
-            long now = Now();
-            var e = Find(key, now);
-            if (e == null) return false;
-            if (ms <= 0) Remove(e);
-            else SetExpire(e, now + Math.Min(ms, MaxTtlMs));
-            _dirty++;
-            return true;
-        }
-    }
-
-    public long PTtl(string key)
-    {
-        lock (_sync)
-        {
-            long now = Now();
-            var e = Find(key, now);
-            if (e == null) return -2;
-            if (e.ExpireAt == 0) return -1;
-            return Math.Max(0, e.ExpireAt - now);
-        }
-    }
-
-    public string? GetDel(string key)
-    {
-        lock (_sync)
-        {
-            var e = Find(key, Now());
-            if (e == null) { _misses++; return null; }
-            _hits++;
-            var v = e.Value;
-            Remove(e); _dirty++;
-            return v;
         }
     }
 
@@ -264,6 +286,23 @@ public sealed class Store
         }
     }
 
+    public bool Expire(string key, long seconds) => ExpireMs(key, seconds >= MaxTtlMs / 1000 ? MaxTtlMs : seconds * 1000);
+
+    public bool ExpireMs(string key, long ms)
+    {
+        lock (_sync)
+        {
+            long now = Now();
+            return ExpireAtLocked(key, ms <= 0 ? 0 : now + Math.Min(ms, MaxTtlMs), now);
+        }
+    }
+
+    // Absolute unix-ms deadline (PEXPIREAT / EXPIREAT).
+    public bool ExpireAt(string key, long absMs)
+    {
+        lock (_sync) return ExpireAtLocked(key, absMs, Now());
+    }
+
     public long Ttl(string key)
     {
         lock (_sync)
@@ -276,6 +315,18 @@ public sealed class Store
         }
     }
 
+    public long PTtl(string key)
+    {
+        lock (_sync)
+        {
+            long now = Now();
+            var e = Find(key, now);
+            if (e == null) return -2;
+            if (e.ExpireAt == 0) return -1;
+            return Math.Max(0, e.ExpireAt - now);
+        }
+    }
+
     public bool Persist(string key)
     {
         lock (_sync)
@@ -283,6 +334,7 @@ public sealed class Store
             var e = Find(key, Now());
             if (e == null || e.ExpireAt == 0) return false;
             SetExpire(e, 0); _dirty++;
+            Emit("PERSIST", key);
             return true;
         }
     }
@@ -309,8 +361,10 @@ public sealed class Store
 
     public void FlushAll()
     {
-        lock (_sync) { _map.Clear(); _lru.Clear(); _ttl.Clear(); _used = 0; _dirty++; }
+        lock (_sync) { ClearLocked(); _dirty++; Emit("FLUSHALL"); }
     }
+
+    void ClearLocked() { _map.Clear(); _lru.Clear(); _ttl.Clear(); _used = 0; }
 
     public int Sweep(int max = 5000)
     {
@@ -321,7 +375,7 @@ public sealed class Store
             {
                 var m = _ttl.Min;
                 if (m.At > now) break;
-                if (_map.TryGetValue(m.Key, out var e)) { Remove(e); _expired++; _dirty++; }
+                if (_map.TryGetValue(m.Key, out var e)) { Remove(e); _expired++; _dirty++; }   // expiry is local: not logged
                 else _ttl.Remove(m);
                 n++;
             }
@@ -329,31 +383,143 @@ public sealed class Store
         }
     }
 
-    // ---- persistence: atomic (tmp + fsync + move) ----
-    public bool Snapshot(string path, bool force)
+    // ---- applying log entries (WAL replay and replication) ----
+    void ApplyEntryLocked(LogEntry e)
+    {
+        var a = e.Args;
+        long now = Now();
+        switch (e.Cmd)
+        {
+            case "SET":
+                {
+                    if (a.Length != 2 && a.Length != 4) throw new InvalidDataException("bad SET entry");
+                    long exp = 0;
+                    if (a.Length == 4)
+                    {
+                        if (a[2] != "PXAT" || !long.TryParse(a[3], NumberStyles.None, Inv, out exp)) throw new InvalidDataException("bad SET entry");
+                        if (exp <= now) { DelLocked(a[0], now); break; }   // already expired
+                    }
+                    Put(a[0], a[1], exp);
+                    break;
+                }
+            case "DEL":
+                if (a.Length != 1) throw new InvalidDataException("bad DEL entry");
+                DelLocked(a[0], now);
+                break;
+            case "PEXPIREAT":
+                if (a.Length != 2 || !long.TryParse(a[1], NumberStyles.None, Inv, out var at)) throw new InvalidDataException("bad PEXPIREAT entry");
+                ExpireAtLocked(a[0], at, now);
+                break;
+            case "PERSIST":
+                if (a.Length != 1) throw new InvalidDataException("bad PERSIST entry");
+                {
+                    var pe = Find(a[0], now);
+                    if (pe != null && pe.ExpireAt != 0) { SetExpire(pe, 0); _dirty++; Emit("PERSIST", a[0]); }
+                }
+                break;
+            case "FLUSHALL":
+                ClearLocked(); _dirty++; Emit("FLUSHALL");
+                break;
+            default:
+                throw new InvalidDataException("unknown log entry '" + e.Cmd + "'");
+        }
+    }
+
+    // WAL replay at startup: nothing is emitted. Entries at or below the current sequence are skipped.
+    public bool ReplayEntry(LogEntry e)
+    {
+        lock (_sync)
+        {
+            if (e.Seq <= _seq) return false;
+            _mode = Mode.Replay;
+            try { ApplyEntryLocked(e); }
+            catch (OomException) { /* limits shrank since the entry was written: keep going */ }
+            finally { _mode = Mode.Normal; }
+            Interlocked.Exchange(ref _seq, e.Seq);
+            return true;
+        }
+    }
+
+    // Replica: apply the primary's next entry. Duplicate = already applied; Gap = entries were missed (needs full resync).
+    public ApplyResult ApplyReplicated(LogEntry e)
+    {
+        lock (_sync)
+        {
+            if (e.Seq <= _seq) return ApplyResult.Duplicate;
+            if (e.Seq != _seq + 1) return ApplyResult.Gap;
+            _mode = Mode.Replicated; _forcedSeq = e.Seq;
+            try { ApplyEntryLocked(e); }
+            catch (OomException) { /* replica limits are smaller than the primary's: skip */ }
+            finally { _mode = Mode.Normal; }
+            Interlocked.Exchange(ref _seq, e.Seq);
+            return ApplyResult.Applied;
+        }
+    }
+
+    // ---- full-sync support (replication) ----
+    public (long Seq, List<SnapEntry> Entries) ExportSnapshot()
+    {
+        lock (_sync)
+        {
+            long now = Now();
+            var list = new List<SnapEntry>(_map.Count);
+            foreach (var e in _lru)
+                if (e.ExpireAt == 0 || e.ExpireAt > now)
+                    list.Add(new SnapEntry { K = e.Key, V = e.Value, E = e.ExpireAt });
+            return (_seq, list);
+        }
+    }
+
+    public void InstallSnapshot(long seq, List<SnapEntry> entries)
+    {
+        lock (_sync)
+        {
+            ClearLocked();
+            _mode = Mode.Replay;
+            try
+            {
+                long now = Now();
+                for (int i = entries.Count - 1; i >= 0; i--)
+                {
+                    var s = entries[i];
+                    if (s.E != 0 && s.E <= now) continue;
+                    try { Put(s.K, s.V, s.E); } catch (OomException) { break; }
+                }
+            }
+            finally { _mode = Mode.Normal; }
+            Interlocked.Exchange(ref _seq, seq);
+            _dirty++;
+        }
+        SnapshotInstalled?.Invoke();
+    }
+
+    // ---- persistence: atomic (tmp + fsync + move). Format v2 records the write sequence + WAL segment. ----
+    public bool Snapshot(string path, bool force, int walSegment = 0)
     {
         lock (_snapSync)
         {
-            List<SnapEntry> list; long mark;
+            SnapshotFile file;
+            long mark;
             lock (_sync)
             {
                 if (!force && _dirty == _savedDirty) return false;
                 long now = Now();
-                list = new(_map.Count);
+                file = new SnapshotFile { Seq = _seq, WalSegment = walSegment, Entries = new List<SnapEntry>(_map.Count) };
                 foreach (var e in _lru)
                     if (e.ExpireAt == 0 || e.ExpireAt > now)
-                        list.Add(new SnapEntry { K = e.Key, V = e.Value, E = e.ExpireAt });
+                        file.Entries.Add(new SnapEntry { K = e.Key, V = e.Value, E = e.ExpireAt });
                 mark = _dirty;
             }
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);
             var tmp = path + ".tmp";
             using (var fs = new FileStream(tmp, FileMode.Create, FileAccess.Write, FileShare.None))
             {
-                JsonSerializer.Serialize(fs, list);
+                JsonSerializer.Serialize(fs, file);
                 fs.Flush(true);
             }
             File.Move(tmp, path, true);
             lock (_sync) { _savedDirty = mark; _lastSaveMs = Now(); }
+            Interlocked.Exchange(ref _savedSeq, file.Seq);
             return true;
         }
     }
@@ -361,19 +527,27 @@ public sealed class Store
     public int Load(string path)
     {
         if (!File.Exists(path)) return 0;
-        List<SnapEntry>? list;
-        using (var fs = File.OpenRead(path)) list = JsonSerializer.Deserialize<List<SnapEntry>>(fs);
-        if (list == null) return 0;
+        SnapshotFile? file;
+        using (var fs = File.OpenRead(path)) file = JsonSerializer.Deserialize<SnapshotFile>(fs);
+        if (file == null) return 0;
         int n = 0;
         lock (_sync)
         {
-            long now = Now();
-            for (int i = list.Count - 1; i >= 0; i--)   // saved MRU->LRU; insert reversed to keep order
+            _mode = Mode.Replay;
+            try
             {
-                var s = list[i];
-                if (s.E != 0 && s.E <= now) continue;
-                try { Put(s.K, s.V, s.E); n++; } catch (OomException) { break; }
+                long now = Now();
+                for (int i = file.Entries.Count - 1; i >= 0; i--)   // saved MRU->LRU; insert reversed to keep order
+                {
+                    var s = file.Entries[i];
+                    if (s.E != 0 && s.E <= now) continue;
+                    try { Put(s.K, s.V, s.E); n++; } catch (OomException) { break; }
+                }
             }
+            finally { _mode = Mode.Normal; }
+            Interlocked.Exchange(ref _seq, file.Seq);
+            Interlocked.Exchange(ref _savedSeq, file.Seq);
+            LoadedWalSegment = file.WalSegment;
             _savedDirty = _dirty;
         }
         return n;
@@ -384,7 +558,7 @@ public sealed class Store
         lock (_sync)
         {
             var sb = new StringBuilder();
-            void L(string k, object v) => sb.Append(k).Append(':').Append(Convert.ToString(v, CultureInfo.InvariantCulture)).Append("\r\n");
+            void L(string k, object v) => sb.Append(k).Append(':').Append(Convert.ToString(v, Inv)).Append("\r\n");
             L("uptime_seconds", (Now() - _startMs) / 1000);
             L("keys", _map.Count);
             L("keys_with_ttl", _ttl.Count);
@@ -397,6 +571,7 @@ public sealed class Store
             L("keyspace_misses", _misses);
             L("expired_keys", _expired);
             L("evicted_keys", _evicted);
+            L("write_seq", _seq);
             L("last_save_unix_ms", _lastSaveMs);
             return sb.ToString();
         }

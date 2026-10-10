@@ -1,59 +1,43 @@
 // File: tests/MsmqCache.Tests/TcpServerFixture.cs
 // Author: Hadi Cahyadi <cumulus13@gmail.com>
 // Date: 2026-10-09
-// Description: Starts the real server host on an ephemeral loopback port for TCP integration tests
+// Description: xUnit fixtures: real server host on an ephemeral loopback port
 // License: MIT
 
-using System.Text.Json;
-using Microsoft.Extensions.Logging.Abstractions;
 using MsmqCache;
 using Xunit;
 
 public abstract class TcpServerFixtureBase : IAsyncLifetime
 {
-    string _dir = "";
-    CacheServerService? _svc;
+    TestHost _host = null!;
 
     protected abstract string Password { get; }
 
-    public int Port { get; private set; }
-    public string DataDir => Path.Combine(_dir, "data");
-    public ConfigManager Config { get; private set; } = null!;
+    public int Port => _host.Port;
+    public ConfigManager Config => _host.Config;
+    public TestHost Host => _host;
 
     public async Task InitializeAsync()
     {
-        _dir = Path.Combine(Path.GetTempPath(), "mcached-it-" + Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(_dir);
-        var cfgPath = Path.Combine(_dir, "config.json");
-        File.WriteAllText(cfgPath, JsonSerializer.Serialize(new
+        var dir = Path.Combine(Path.GetTempPath(), "msmqcache-fx-" + Guid.NewGuid().ToString("N"));
+        _host = await TestHost.StartAsync(new
         {
             EnableTcp = true,
             EnableMsmq = false,
             BindAddress = "127.0.0.1",
             Port = 0,
             Password = Password,
-            DataDirectory = DataDir,
+            DataDirectory = Path.Combine(dir, "data"),
             PersistenceEnabled = true,
             SnapshotIntervalSeconds = 3600,
             MaxValueLength = 1000
-        }));
-
-        Config = ConfigManager.Load(new[] { "--config", cfgPath });
-        var store = new Store(Config.Current);
-        var stats = new ServerStats();
-        var handler = new CommandHandler(store, Config, stats, NullLogger<CommandHandler>.Instance);
-        _svc = new CacheServerService(NullLogger<CacheServerService>.Instance, Config, store, handler, stats);
-        await _svc.StartAsync(CancellationToken.None);
-
-        for (int i = 0; i < 100 && _svc.TcpPort == 0; i++) await Task.Delay(50);
-        Port = _svc.TcpPort;
-        if (Port == 0) throw new InvalidOperationException("server did not start listening");
+        }, dir);
     }
 
     public async Task DisposeAsync()
     {
-        if (_svc != null) await _svc.StopAsync(CancellationToken.None);
-        try { Directory.Delete(_dir, true); } catch { }
+        await _host.DisposeAsync();
+        try { Directory.Delete(_host.Dir, true); } catch { }
     }
 }
 

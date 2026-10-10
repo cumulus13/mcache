@@ -1,0 +1,16 @@
+{
+  "EnableTcp": true,
+  "BindAddress": "0.0.0.0",
+  "Port": 6379,
+  "Password": "CHANGE-ME",
+  "PersistenceEnabled": true,
+  "WalEnabled": true,
+  "WalMode": "async",
+  "MaxValueLength": 250000,
+
+  "Role": "replica",
+  "ReplicationQueue": ".\\Private$\\msmqcache_repl",
+  "ReplicaAdvertisedQueue": "FormatName:DIRECT=OS:replica-host\\private$\\msmqcache_repl",
+  "PrimaryControlQueue": "FormatName:DIRECT=OS:primary-host\\private$\\msmqcache_ctl",
+  "RequireAuthenticatedReplication": false
+}

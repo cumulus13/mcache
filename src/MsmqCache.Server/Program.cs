@@ -21,6 +21,9 @@ builder.Services.AddWindowsService(o => o.ServiceName = "MsmqCache");
 builder.Services.AddSingleton(cfg);
 builder.Services.AddSingleton(sp => new Store(cfg.Current));
 builder.Services.AddSingleton<ServerStats>();
+builder.Services.AddSingleton<WriteDispatcher>();
+builder.Services.AddSingleton<PubSubHub>();
+builder.Services.AddSingleton<Checkpointer>();
 builder.Services.AddSingleton<CommandHandler>();
 builder.Services.AddHostedService<CacheServerService>();
 

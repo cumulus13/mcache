@@ -101,14 +101,4 @@ OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
 MSMQ is a Windows component and is not distributed with MsmqCache. Its use is governed by your Windows license.
 
 ---
-
-## 👤 Author
-        
-[Hadi Cahyadi](mailto:cumulus13@gmail.com)
-    
-
-[![Buy Me a Coffee](https://www.buymeacoffee.com/assets/img/custom_images/orange_img.png)](https://www.buymeacoffee.com/cumulus13)
-
-[![Donate via Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/cumulus13)
- 
-[Support me on Patreon](https://www.patreon.com/cumulus13)
+Review this file whenever dependencies or their versions change.

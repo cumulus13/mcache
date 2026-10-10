@@ -18,6 +18,7 @@ public static class RespWriter
 
     public static void Write(Stream o, Response r)
     {
+        if (r.RawResp != null) { o.Write(r.RawResp); return; }
         switch (r.Kind)
         {
             case Kinds.Ok: Line(o, '+', Clean(r.Str ?? "OK")); break;

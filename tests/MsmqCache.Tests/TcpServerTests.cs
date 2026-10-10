@@ -234,3 +234,83 @@ public class TcpAuthTests : IClassFixture<SecuredServerFixture>
         Assert.DoesNotContain("s3cret-pw", string.Join(",", cl.Execute("CONFIG", "GET", "*").Arr!));
     }
 }
+
+public class TcpPubSubTests : IClassFixture<OpenServerFixture>
+{
+    readonly OpenServerFixture _fx;
+    public TcpPubSubTests(OpenServerFixture fx) => _fx = fx;
+
+    TcpClient Connect() => new("127.0.0.1", _fx.Port) { NoDelay = true, ReceiveTimeout = 5000, SendTimeout = 5000 };
+    static void Send(TcpClient c, string s) => c.GetStream().Write(Encoding.UTF8.GetBytes(s));
+    static string Cmd(params string[] a) =>
+        $"*{a.Length}\r\n" + string.Concat(a.Select(x => $"${Encoding.UTF8.GetByteCount(x)}\r\n{x}\r\n"));
+
+    static string ReadExact(TcpClient c, int n)
+    {
+        var buf = new byte[n]; int got = 0; var s = c.GetStream();
+        while (got < n) { int r = s.Read(buf, got, n - got); if (r <= 0) throw new IOException("closed"); got += r; }
+        return Encoding.UTF8.GetString(buf);
+    }
+
+    [Fact]
+    public void Subscribe_Receives_Published_Messages_And_Restricts_Commands()
+    {
+        using var sub = Connect();
+        Send(sub, Cmd("SUBSCRIBE", "news"));
+        string confirm = "*3\r\n$9\r\nsubscribe\r\n$4\r\nnews\r\n:1\r\n";
+        Assert.Equal(confirm, ReadExact(sub, confirm.Length));
+
+        using var pub = new TcpCacheClient(new TcpClientOptions { Port = _fx.Port });
+        Assert.Equal(1, pub.Execute("PUBLISH", "news", "hello").Num);
+
+        string msg = "*3\r\n$7\r\nmessage\r\n$4\r\nnews\r\n$5\r\nhello\r\n";
+        Assert.Equal(msg, ReadExact(sub, msg.Length));
+
+        // a subscribed connection may only (un)subscribe / PING / QUIT
+        Send(sub, Cmd("GET", "x"));
+        var errBuf = new byte[64]; int n = sub.GetStream().Read(errBuf, 0, errBuf.Length);
+        Assert.StartsWith("-ERR Can't execute 'get'", Encoding.UTF8.GetString(errBuf, 0, n));
+
+        Send(sub, Cmd("PING"));
+        string pong = "*2\r\n$4\r\npong\r\n$0\r\n\r\n";
+        Assert.Equal(pong, ReadExact(sub, pong.Length));
+
+        Send(sub, Cmd("UNSUBSCRIBE"));
+        string unsub = "*3\r\n$11\r\nunsubscribe\r\n$4\r\nnews\r\n:0\r\n";
+        Assert.Equal(unsub, ReadExact(sub, unsub.Length));
+
+        Assert.Equal(0, pub.Execute("PUBLISH", "news", "nobody").Num);
+        Send(sub, Cmd("PING"));                       // normal mode again
+        Assert.Equal("+PONG\r\n", ReadExact(sub, 7));
+    }
+
+    [Fact]
+    public void Two_Subscribers_Both_Receive_And_Count_Is_Reported()
+    {
+        using var a = Connect(); using var b = Connect();
+        Send(a, Cmd("SUBSCRIBE", "multi")); Send(b, Cmd("SUBSCRIBE", "multi"));
+        string confirm = "*3\r\n$9\r\nsubscribe\r\n$5\r\nmulti\r\n:1\r\n";
+        ReadExact(a, confirm.Length); ReadExact(b, confirm.Length);
+
+        using var pub = new TcpCacheClient(new TcpClientOptions { Port = _fx.Port });
+        Assert.Equal(2, pub.Execute("PUBLISH", "multi", "x").Num);
+        string msg = "*3\r\n$7\r\nmessage\r\n$5\r\nmulti\r\n$1\r\nx\r\n";
+        Assert.Equal(msg, ReadExact(a, msg.Length));
+        Assert.Equal(msg, ReadExact(b, msg.Length));
+    }
+
+    [Fact]
+    public void Disconnected_Subscriber_Is_Removed()
+    {
+        using (var s = Connect())
+        {
+            Send(s, Cmd("SUBSCRIBE", "gone"));
+            string confirm = "*3\r\n$9\r\nsubscribe\r\n$4\r\ngone\r\n:1\r\n";
+            ReadExact(s, confirm.Length);
+        }
+        using var pub = new TcpCacheClient(new TcpClientOptions { Port = _fx.Port });
+        long n = 1;
+        for (int i = 0; i < 40 && n != 0; i++) { n = pub.Execute("PUBLISH", "gone", "x").Num; if (n != 0) Thread.Sleep(50); }
+        Assert.Equal(0, n);
+    }
+}

@@ -53,6 +53,41 @@ public sealed class ServerConfig
     public bool RequireAuthenticatedRequests { get; set; } = false; // server rejects requests where Message.Authenticated == false
     public bool ApplyAclOnStartup { get; set; } = false;     // grant QueueAcl entries on the request queue at startup
     public QueueAclEntry[] QueueAcl { get; set; } = Array.Empty<QueueAclEntry>();
+
+    // ---- Pub/Sub ----
+    public bool EnablePubSub { get; set; } = true;
+
+    // ---- MSMQ write-ahead log (durability backend) ----
+    public bool WalEnabled { get; set; } = false;            // every write is appended to transactional MSMQ queues; replayed at startup
+    public string WalQueue { get; set; } = @".\Private$\msmqcache_wal";   // base name; segments are <base>_00000001, ...
+    public string WalMode { get; set; } = "async";           // async: reply immediately, log in background | sync: reply after the log commit
+    public int WalBatchMax { get; set; } = 500;              // entries per MSMQ transaction (group commit)
+    public int WalSyncTimeoutMs { get; set; } = 5000;        // sync mode: max wait for the commit
+    public int WalMaxBacklog { get; set; } = 200000;         // writes are rejected (BUSY) above this many un-logged entries
+    public long WalCheckpointEntries { get; set; } = 100000; // snapshot + drop old segments after this many entries
+    public long WalQueueMaxSizeKb { get; set; } = 0;         // quota per segment queue; 0 = MSMQ default
+    public bool WalSkipCorrupt { get; set; } = false;        // false: refuse to start on a corrupt log message (like Redis AOF)
+
+    // ---- Replication over MSMQ ----
+    public string Role { get; set; } = "primary";            // primary | replica
+    // primary:
+    public string[] Replicas { get; set; } = Array.Empty<string>();   // destination queues, e.g. "FormatName:DIRECT=OS:host2\\private$\\msmqcache_repl"
+    public string ControlQueue { get; set; } = @".\Private$\msmqcache_ctl";  // receives "hello"/resync requests from replicas
+    public int ReplicationBatchMax { get; set; } = 500;
+    public int ReplicationMaxBacklog { get; set; } = 1000000; // above this the backlog is dropped and the replica is full-resynced
+    // replica:
+    public string ReplicationQueue { get; set; } = @".\Private$\msmqcache_repl";   // local queue this replica consumes
+    public string PrimaryControlQueue { get; set; } = "";    // e.g. "FormatName:DIRECT=OS:primary-host\\private$\\msmqcache_ctl"
+    public string ReplicaAdvertisedQueue { get; set; } = ""; // how the primary reaches ReplicationQueue; must equal the primary's Replicas entry
+    // MSMQ delivery features for replication traffic:
+    public int ReplicationTimeToReachQueueSeconds { get; set; } = 0;   // 0 = keep trying (store-and-forward) until delivered
+    public bool ReplicationUseDeadLetterQueue { get; set; } = true;
+    public bool ReplicationJournal { get; set; } = false;    // sender-side journal copy of every message (audit; counts toward quota)
+    public bool ReplicationAcknowledge { get; set; } = false;// negative acknowledgments to AdminQueue (logged + counted)
+    public string AdminQueue { get; set; } = @".\Private$\msmqcache_admin";
+    public bool ReplicationAuthenticate { get; set; } = false;
+    public bool ReplicationEncrypt { get; set; } = false;
+    public bool RequireAuthenticatedReplication { get; set; } = false; // receivers drop unauthenticated replication/control messages
 }
 
 public sealed class QueueAclEntry
@@ -129,6 +164,25 @@ public sealed class ConfigManager
         if (c.Port is < 0 or > 65535) throw new InvalidDataException("Port must be 0..65535");
         if (c.MaxClients < 1 || c.IdleTimeoutSeconds < 0) throw new InvalidDataException("invalid MaxClients/IdleTimeoutSeconds");
         c.BindAddress = (c.BindAddress ?? "").Trim();
+        c.Role = (c.Role ?? "primary").ToLowerInvariant();
+        c.WalMode = (c.WalMode ?? "async").ToLowerInvariant();
+        c.Replicas ??= Array.Empty<string>();
+        if (c.Role is not ("primary" or "replica")) throw new InvalidDataException("Role must be primary or replica");
+        if (c.WalMode is not ("async" or "sync")) throw new InvalidDataException("WalMode must be async or sync");
+        bool msmqStorage = c.WalEnabled || c.Replicas.Length > 0 || c.Role == "replica";
+        if (msmqStorage && !OperatingSystem.IsWindows())
+            throw new InvalidDataException("WalEnabled / Replicas / Role=replica use MSMQ and require Windows");
+        if (c.WalEnabled && !c.PersistenceEnabled)
+            throw new InvalidDataException("WalEnabled requires PersistenceEnabled (snapshots checkpoint and truncate the log)");
+        if (c.Role == "replica" && c.Replicas.Length > 0) throw new InvalidDataException("a replica cannot have Replicas");
+        if (c.Role == "replica" && (string.IsNullOrWhiteSpace(c.ReplicationQueue) || string.IsNullOrWhiteSpace(c.PrimaryControlQueue) || string.IsNullOrWhiteSpace(c.ReplicaAdvertisedQueue)))
+            throw new InvalidDataException("Role=replica requires ReplicationQueue, PrimaryControlQueue and ReplicaAdvertisedQueue");
+        if (c.Replicas.Length > 0 && string.IsNullOrWhiteSpace(c.ControlQueue)) throw new InvalidDataException("Replicas requires ControlQueue");
+        if (msmqStorage && c.MaxValueLength > 250_000)
+            throw new InvalidDataException("MaxValueLength must be <= 250000 when WAL/replication is used (MSMQ messages are limited to 4 MB)");
+        if (c.WalBatchMax is < 1 or > 10000 || c.ReplicationBatchMax is < 1 or > 10000) throw new InvalidDataException("batch size must be 1..10000");
+        if (c.WalSyncTimeoutMs < 100 || c.WalMaxBacklog < 1 || c.WalCheckpointEntries < 1 || c.ReplicationMaxBacklog < 1000)
+            throw new InvalidDataException("invalid WAL/replication limit");
         if (c.EnableTcp && !TryParseBind(c.BindAddress, out _)) throw new InvalidDataException("BindAddress must be an IP address or 'localhost'");
         c.Password ??= ""; c.TlsCertificatePassword ??= ""; c.TlsCertificatePath ??= "";
         if (c.TlsEnabled && c.TlsCertificatePath.Length == 0) throw new InvalidDataException("TlsEnabled requires TlsCertificatePath");
@@ -147,6 +201,9 @@ public sealed class ConfigManager
             if (e.Rights is not ("send" or "receive" or "full")) throw new InvalidDataException("QueueAcl Rights must be send, receive or full");
         }
     }
+
+    // Test helper: wraps an in-memory config without touching the disk or running validation.
+    public static ConfigManager ForTesting(ServerConfig cfg, string filePath = "") => new(filePath, cfg);
 
     public static bool TryParseBind(string s, out System.Net.IPAddress ip)
     {

@@ -29,12 +29,16 @@ public sealed class Response
     [JsonPropertyName("num")]  public long Num { get; set; }
     [JsonPropertyName("arr")]  public string?[]? Arr { get; set; }
 
+    // Server-side only: pre-encoded RESP frame(s) (pub/sub replies). Never serialized.
+    [JsonIgnore] public byte[]? RawResp { get; set; }
+
     public static Response Ok(string s = "OK") => new() { Kind = Kinds.Ok, Str = s };
     public static Response Number(long n)     => new() { Kind = Kinds.Num, Num = n };
     public static Response Bulk(string s)      => new() { Kind = Kinds.Bulk, Str = s };
     public static Response Nil()               => new();
     public static Response List(string?[] a)   => new() { Kind = Kinds.List, Arr = a };
     public static Response Error(string m)     => new() { Kind = Kinds.Err, Str = m };
+    public static Response Raw(byte[] frame)   => new() { Kind = Kinds.Ok, RawResp = frame };
 }
 
 public static class Wire

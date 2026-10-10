@@ -10,6 +10,7 @@
     <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
   </ItemGroup>
   <ItemGroup>
+    <Compile Include="..\MsmqCache.Tests\TestHost.cs" Link="TestHost.cs" />
     <ProjectReference Include="..\..\src\MsmqCache.Protocol\MsmqCache.Protocol.csproj" />
     <ProjectReference Include="..\..\src\MsmqCache.Server\MsmqCache.Server.csproj" />
     <ProjectReference Include="..\..\src\MsmqCache.Client\MsmqCache.Client.csproj" />

@@ -90,6 +90,15 @@ check("pipeline", [c.reply(), c.reply(), c.reply()], [("+", "PONG"), ("+", "OK")
 # inline (telnet style)
 c.s.sendall(b"PING\r\n"); check("inline PING", c.reply(), ("+", "PONG"))
 
+# pub/sub: one subscriber connection, one publisher connection
+sub = Conn(a.host, a.port)
+if a.password: sub.cmd("AUTH", a.password)
+ch = "smoke-ch-%d" % int(time.time() * 1000)
+check("SUBSCRIBE", sub.cmd("SUBSCRIBE", ch), ["subscribe", ch, 1])
+check("PUBLISH count", c.cmd("PUBLISH", ch, "hello"), 1)
+check("message push", sub.reply(), ["message", ch, "hello"])
+check("UNSUBSCRIBE", sub.cmd("UNSUBSCRIBE", ch), ["unsubscribe", ch, 0])
+
 # invalid UTF-8 => protocol error + close
 c2 = Conn(a.host, a.port)
 if a.password: c2.cmd("AUTH", a.password)

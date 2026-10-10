@@ -29,14 +29,14 @@ jobs:
           dotnet-version: 8.0.x
 
       - name: Restore
-        run: dotnet restore MsmqCache.sln
+        run: dotnet restore msmqcache.sln
 
       - name: Build
-        run: dotnet build MsmqCache.sln -c Release --no-restore
+        run: dotnet build msmqcache.sln -c Release --no-restore
 
       # Unit tests + real TCP/RESP integration tests (loopback). MSMQ tests are skipped unless MSMQCACHE_MSMQ_TESTS=1.
       - name: Test
-        run: dotnet test MsmqCache.sln -c Release --no-build --logger "trx;LogFileName=test.trx" --results-directory TestResults
+        run: dotnet test msmqcache.sln -c Release --no-build --logger "trx;LogFileName=test.trx" --results-directory TestResults
 
       - name: Upload test results
         if: always()
