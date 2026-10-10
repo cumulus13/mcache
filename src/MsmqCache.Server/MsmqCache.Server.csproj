@@ -8,7 +8,7 @@
   <ItemGroup>
     <ProjectReference Include="..\MsmqCache.Protocol\MsmqCache.Protocol.csproj" />
     <PackageReference Include="Experimental.System.Messaging" Version="1.2.0" />
-    <PackageReference Include="Microsoft.Extensions.Hosting" Version="8.0.*" />
-    <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="8.0.*" />
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.*" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="10.0.*" />
   </ItemGroup>
 </Project>
